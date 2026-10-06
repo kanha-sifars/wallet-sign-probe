@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Wallet signing probe</title>
+    <script
+      src="https://unpkg.com/@solana/web3.js@1.98.4/lib/index.iife.min.js"
+      integrity="sha384-I45YF+S0YGWIolUyTksLk9TNtTqaDgZg8e6T1OoBoJvvFmphqYNIPZw3Kl0TkZNN"
+      crossorigin="anonymous"
+    ></script>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #111111;
+        --muted: #555555;
+        --border: #cccccc;
+        --ok: #0a7a2f;
+        --bad: #b00020;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #111111;
+          --fg: #f2f2f2;
+          --muted: #aaaaaa;
+          --border: #444444;
+          --ok: #4cd07d;
+          --bad: #ff6b81;
+        }
+      }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font-family: system-ui, sans-serif;
+        margin: 0 auto;
+        max-width: 720px;
+        padding: 16px;
+      }
+      p {
+        color: var(--muted);
+      }
+      button {
+        display: block;
+        font-size: 18px;
+        margin: 8px 0;
+        padding: 12px 16px;
+        width: 100%;
+      }
+      #results div {
+        border: 1px solid var(--border);
+        font-family: ui-monospace, monospace;
+        font-size: 14px;
+        margin: 8px 0;
+        padding: 8px;
+        word-break: break-all;
+      }
+      .unchanged {
+        color: var(--ok);
+      }
+      .changed,
+      .error {
+        color: var(--bad);
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Wallet signing probe (Solana Devnet)</h1>
+    <p>
+      Builds a memo-only Devnet transaction, asks the wallet to sign it, and reports whether the
+      wallet changed the transaction message. Nothing is ever sent to the network.
+    </p>
+    <div id="buttons"></div>
+    <div id="results"></div>
+    <script>
+      const { Connection, PublicKey, Transaction, TransactionInstruction } = solanaWeb3
+      const MEMO_PROGRAM = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr")
+      const LIGHTHOUSE_PROGRAM = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95"
+      const connection = new Connection("https://api.devnet.solana.com", "confirmed")
+      const standardWallets = []
+
+      function show(text, kind) {
+        const line = document.createElement("div")
+        line.className = kind
+        line.textContent = text
+        document.getElementById("results").prepend(line)
+      }
+
+      async function memoTransaction(feePayer) {
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash()
+        const transaction = new Transaction({ feePayer, blockhash, lastValidBlockHeight })
+        transaction.add(
+          new TransactionInstruction({
+            programId: MEMO_PROGRAM,
+            keys: [],
+            data: Uint8Array.from(new TextEncoder().encode("voidhelm signing probe " + new Date().toISOString())),
+          })
+        )
+        return transaction
+      }
+
+      function report(label, before, signed) {
+        const after = signed.serializeMessage()
+        const unchanged = before.length === after.length && before.every((byte, i) => byte === after[i])
+        const programs = signed.instructions.map((instruction) => instruction.programId.toBase58())
+        const lighthouse = programs.includes(LIGHTHOUSE_PROGRAM) ? " | Lighthouse added" : ""
+        show(
+          `${label}: ${unchanged ? "UNCHANGED" : "CHANGED"} | ${programs.length} instruction(s): ${programs.join(", ")}${lighthouse} | signature valid: ${signed.verifySignatures(false)}`,
+          unchanged ? "unchanged" : "changed"
+        )
+      }
+
+      async function probeInjected(name) {
+        const provider = name === "Phantom" ? window.phantom?.solana : window.solflare
+        if (!provider?.signTransaction) throw new Error(`${name} injected provider not found`)
+        await provider.connect()
+        const transaction = await memoTransaction(provider.publicKey)
+        const before = transaction.serializeMessage()
+        report(`${name} injected provider`, before, await provider.signTransaction(transaction))
+      }
+
+      async function probeStandard(wallet) {
+        const { accounts } = await wallet.features["standard:connect"].connect()
+        const account = accounts[0]
+        const transaction = await memoTransaction(new PublicKey(account.address))
+        const before = transaction.serializeMessage()
+        const [{ signedTransaction }] = await wallet.features["solana:signTransaction"].signTransaction({
+          account,
+          chain: "solana:devnet",
+          transaction: transaction.serialize({ requireAllSignatures: false, verifySignatures: false }),
+        })
+        report(`${wallet.name} Wallet Standard`, before, Transaction.from(signedTransaction))
+      }
+
+      function addButton(label, run) {
+        const button = document.createElement("button")
+        button.textContent = label
+        button.addEventListener("click", async () => {
+          try {
+            await run()
+          } catch (error) {
+            show(`${label}: ERROR ${error?.message ?? error}`, "error")
+          }
+        })
+        document.getElementById("buttons").append(button)
+      }
+
+      function render() {
+        document.getElementById("buttons").replaceChildren()
+        addButton("Phantom: sign via injected provider", () => probeInjected("Phantom"))
+        addButton("Solflare: sign via injected provider", () => probeInjected("Solflare"))
+        for (const wallet of standardWallets) {
+          if (wallet.features["solana:signTransaction"] && wallet.features["standard:connect"]) {
+            addButton(`${wallet.name}: sign via Wallet Standard`, () => probeStandard(wallet))
+          }
+        }
+      }
+
+      function register(...wallets) {
+        standardWallets.push(...wallets)
+        render()
+        return () => {}
+      }
+
+      window.addEventListener("wallet-standard:register-wallet", (event) => event.detail({ register }))
+      window.dispatchEvent(new CustomEvent("wallet-standard:app-ready", { detail: { register } }))
+      window.addEventListener("load", render)
+      render()
+    </script>
+  </body>
+</html>
