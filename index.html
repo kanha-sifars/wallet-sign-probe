@@ -73,7 +73,7 @@
     <div id="buttons"></div>
     <div id="results"></div>
     <script>
-      const { Connection, PublicKey, Transaction, TransactionInstruction } = solanaWeb3
+      const { ComputeBudgetProgram, Connection, PublicKey, Transaction, TransactionInstruction } = solanaWeb3
       const MEMO_PROGRAM = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr")
       const LIGHTHOUSE_PROGRAM = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95"
       const connection = new Connection("https://api.devnet.solana.com", "confirmed")
@@ -86,9 +86,13 @@
         document.getElementById("results").prepend(line)
       }
 
-      async function memoTransaction(feePayer) {
+      async function memoTransaction(feePayer, withFees) {
         const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash()
         const transaction = new Transaction({ feePayer, blockhash, lastValidBlockHeight })
+        if (withFees) {
+          transaction.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 20000 }))
+          transaction.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1000 }))
+        }
         transaction.add(
           new TransactionInstruction({
             programId: MEMO_PROGRAM,
@@ -110,26 +114,26 @@
         )
       }
 
-      async function probeInjected(name) {
+      async function probeInjected(name, withFees = false) {
         const provider = name === "Phantom" ? window.phantom?.solana : window.solflare
         if (!provider?.signTransaction) throw new Error(`${name} injected provider not found`)
         await provider.connect()
-        const transaction = await memoTransaction(provider.publicKey)
+        const transaction = await memoTransaction(provider.publicKey, withFees)
         const before = transaction.serializeMessage()
-        report(`${name} injected provider`, before, await provider.signTransaction(transaction))
+        report(`${name} injected provider${withFees ? " (app sets fees)" : ""}`, before, await provider.signTransaction(transaction))
       }
 
-      async function probeStandard(wallet) {
+      async function probeStandard(wallet, withFees = false) {
         const { accounts } = await wallet.features["standard:connect"].connect()
         const account = accounts[0]
-        const transaction = await memoTransaction(new PublicKey(account.address))
+        const transaction = await memoTransaction(new PublicKey(account.address), withFees)
         const before = transaction.serializeMessage()
         const [{ signedTransaction }] = await wallet.features["solana:signTransaction"].signTransaction({
           account,
           chain: "solana:devnet",
           transaction: transaction.serialize({ requireAllSignatures: false, verifySignatures: false }),
         })
-        report(`${wallet.name} Wallet Standard`, before, Transaction.from(signedTransaction))
+        report(`${wallet.name} Wallet Standard${withFees ? " (app sets fees)" : ""}`, before, Transaction.from(signedTransaction))
       }
 
       function addButton(label, run) {
@@ -149,9 +153,11 @@
         document.getElementById("buttons").replaceChildren()
         addButton("Phantom: sign via injected provider", () => probeInjected("Phantom"))
         addButton("Solflare: sign via injected provider", () => probeInjected("Solflare"))
+        addButton("Phantom: injected, app sets fees", () => probeInjected("Phantom", true))
         for (const wallet of standardWallets) {
           if (wallet.features["solana:signTransaction"] && wallet.features["standard:connect"]) {
             addButton(`${wallet.name}: sign via Wallet Standard`, () => probeStandard(wallet))
+            if (wallet.name === "Phantom") addButton("Phantom: Wallet Standard, app sets fees", () => probeStandard(wallet, true))
           }
         }
       }
